@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Personal Finance Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Google+Sans+Code:wght@400;500;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <!-- sql.js for client-side SQLite parsing -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.11.0/sql-wasm.js"></script>
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="brand">
+                <h2>💸 FinDash</h2>
+            </div>
+            <nav class="nav-menu">
+                <button class="nav-item active" data-target="view-overview">Monthly expenses</button>
+                <button class="nav-item" data-target="view-category">By Category</button>
+            </nav>
+            <div
+                style="padding: 1.5rem; margin-top: auto; border-top: 3px solid var(--border-color); background-color: #000;">
+                <button id="sidebar-reload-btn" class="btn"
+                    style="width: 100%; justify-content: center; font-size: 0.85rem; background-color: #ff3366 !important; color: white !important;">🔄
+                    Reload DB</button>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Database Upload Screen -->
+            <div id="db-upload-screen" class="upload-screen" style="display: none;">
+                <div class="upload-box" id="upload-drop-zone">
+                    <span class="upload-icon">💸</span>
+                    <h2>Load Expenses Database</h2>
+                    <p>Drag & drop your <strong>expenses.db</strong> SQLite file here, or click below to select it.</p>
+                    <p
+                        style="font-size: 0.9rem; margin-top: 1.5rem; color: var(--text-muted); font-family: 'Google Sans Code', Monaco, Consolas, monospace; background-color: #f0f0f0; padding: 0.5rem; border: 2px solid #000; display: inline-block;">
+                        Required: <code>/home/ravi/Desktop/temp/statements/output/expenses.db</code>
+                    </p>
+                    <input type="file" id="db-file-input" accept=".db,.sqlite,.sqlite3" style="display: none;">
+                    <div style="margin-top: 1.5rem;">
+                        <button id="browse-db-btn" class="btn">📂 Browse File</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Dashboard Content Wrapper (hidden when no DB is loaded) -->
+            <div id="dashboard-content" style="display: none;">
+                <header class="topbar">
+                    <h1 id="page-title">Overview</h1>
+                </header>
+
+                <div class="view-container">
+                    <!-- Overview View -->
+                    <section id="view-overview" class="view active">
+                        <div class="filters"
+                            style="margin-bottom: 1.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <h2 style="font-size: 1.25rem;">Overview Summary</h2>
+                            <select id="overview-month-filter" class="filter-input"
+                                style="min-width: 200px; font-weight: bold;">
+                                <!-- Populated by JS -->
+                            </select>
+                        </div>
+
+                        <!-- 1. Top: Bar Chart -->
+                        <div class="chart-container full-width" style="margin-bottom: 2rem;">
+                            <h3>Expenses by Category</h3>
+                            <canvas id="overview-category-chart" style="width: 100%; height: 350px;"></canvas>
+                        </div>
+
+                        <!-- 2. Middle: Summary + Category Breakdown side by side -->
+                        <div style="display: flex; gap: 1.5rem; margin-bottom: 2rem; align-items: stretch;">
+                            <!-- Summary Cards -->
+                            <div class="cards-grid" id="overview-summary-cards"
+                                style="flex: 1; margin-bottom: 0; grid-template-columns: 1fr; align-content: start;">
+                                <div class="summary-card total-debit">
+                                    <h3>Total Expenses</h3>
+                                    <div class="amount" id="overview-total-expenses">$0.00</div>
+                                </div>
+                                <div class="summary-card total-credit">
+                                    <h3>Total Credits</h3>
+                                    <div class="amount" id="overview-total-credits">$0.00</div>
+                                </div>
+                                <div class="summary-card net-balance">
+                                    <h3>Net Balance</h3>
+                                    <div class="amount" id="overview-net-balance">$0.00</div>
+                                </div>
+                            </div>
+
+                            <!-- Category Breakdown Table -->
+                            <div class="table-responsive" style="flex: 1; margin-bottom: 0; max-width: 400px;">
+                                <h3 style="padding: 1.5rem 1.5rem 0 1.5rem; margin-bottom: 1rem;">Category Breakdown
+                                </h3>
+                                <table class="data-table" id="overview-category-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Category</th>
+                                            <th style="text-align: right;">Total</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <!-- Populated by JS -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- 3. Bottom: All Transaction, s -->
+                        <div class="recent-transactions">
+                            <div
+                                style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                                <div style="display: flex; align-items: center; gap: 1rem;">
+                                    <h2 id="transactions-header" style="margin-bottom: 0;">Transactions</h2>
+                                    <select id="overview-rows-per-page" class="filter-input">
+                                        <option value="10">10 rows</option>
+                                        <option value="25">25 rows</option>
+                                        <option value="50" selected>50 rows</option>
+                                        <option value="100">100 rows</option>
+                                        <option value="all">All</option>
+                                    </select>
+                                </div>
+                                <div style="display: flex; gap: 0.5rem;">
+                                    <span id="overview-filtered-total"
+                                        style="font-weight: 800; font-size: 0.9rem; line-height: 2.5; font-family: 'Google Sans Code', Monaco, Consolas, monospace; margin-right: 1rem;"></span>
+                                    <button id="download-transactions-xls-btn" class="btn btn-excel">⬇ Excel</button>
+                                    <button id="download-transactions-pdf-btn" class="btn btn-pdf">⬇ PDF</button>
+                                    <button id="download-transactions-btn" class="btn btn-png">⬇ PNG</button>
+                                </div>
+                            </div>
+                            <div class="table-responsive" id="overview-transactions-wrapper">
+                                <table class="data-table" id="recent-table">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th class="sortable" data-sort="date">Date <span class="sort-icon">↓</span>
+                                            </th>
+                                            <th class="sortable wrap-text" data-sort="description">
+                                                <div style="display: flex; flex-direction: column; gap: 0.25rem;">
+                                                    <span>Description <span class="sort-icon">↕</span></span>
+                                                    <input type="text" id="overview-desc-filter" class="filter-input"
+                                                        placeholder="Filter text..."
+                                                        style="padding: 0.2rem 0.5rem; font-size: 0.8em; width: 100%; font-weight: normal;"
+                                                        onclick="event.stopPropagation()">
+                                                </div>
+                                            </th>
+                                            <th class="sortable" data-sort="category">
+                                                <div
+                                                    style="display: flex; align-items: center; gap: 0.5rem; justify-content: space-between;">
+                                                    <span>Category <span class="sort-icon">↕</span></span>
+                                                    <div class="multi-select-dropdown"
+                                                        onclick="event.stopPropagation()">
+                                                        <button id="overview-table-category-filter-trigger"
+                                                            class="multi-select-trigger filter-input"
+                                                            style="padding: 0.1rem 0.5rem; font-size: 0.8em; min-width: 120px;">
+                                                            <span id="overview-category-filter-label">All
+                                                                Categories</span>
+                                                        </button>
+                                                        <div id="overview-table-category-filter-menu"
+                                                            class="multi-select-menu">
+                                                            <!-- Populated by JS -->
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </th>
+                                            <th class="sortable" data-sort="source">Bank <span
+                                                    class="sort-icon">↕</span></th>
+                                            <th class="sortable" data-sort="amount">Amount <span
+                                                    class="sort-icon">↕</span></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <!-- Rows populated by JS -->
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div class="pagination" id="overview-pagination">
+                                <button id="overview-btn-prev" class="btn">Previous</button>
+                                <span id="overview-page-info">Page 1</span>
+                                <button id="overview-btn-next" class="btn">Next</button>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Category View -->
+                    <section id="view-category" class="view">
+                        <div class="filters"
+                            style="margin-bottom: 1.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <h2 style="font-size: 1.25rem;">Category Summary</h2>
+                            <select id="category-tab-filter" class="filter-input"
+                                style="min-width: 200px; font-weight: bold;">
+                                <!-- Populated by JS -->
+                            </select>
+                        </div>
+
+                        <!-- 1. Top: Bar Chart -->
+                        <div class="chart-container full-width"
+                            style="margin-bottom: 2rem; min-width: 0; max-width: 100%; width: 100%;">
+                            <h3>Expenses by Month</h3>
+                            <div id="category-chart-scroll" style="overflow-x: auto; overflow-y: hidden; width: 100%;">
+                                <canvas id="category-tab-chart" style="height: 350px;"></canvas>
+                            </div>
+                        </div>
+
+                        <div id="category-total-summary">
+                            <div><strong>Total Amount:</strong> <span id="category-total-amount">$0.00</span></div>
+                        </div>
+
+                        <!-- 2. Bottom: All Transactions -->
+                        <div class="recent-transactions">
+                            <div
+                                style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                                <div style="display: flex; align-items: center; gap: 1rem;">
+                                    <h2 id="category-tab-transactions-header" style="margin-bottom: 0;">Transactions
+                                    </h2>
+                                    <select id="category-tab-rows-per-page" class="filter-input">
+                                        <option value="10">10 rows</option>
+                                        <option value="25">25 rows</option>
+                                        <option value="50" selected>50 rows</option>
+                                        <option value="100">100 rows</option>
+                                        <option value="all">All</option>
+                                    </select>
+                                </div>
+                                <div style="display: flex; gap: 0.5rem;">
+                                    <button id="category-download-xls-btn" class="btn btn-excel">⬇ Excel</button>
+                                    <button id="category-download-pdf-btn" class="btn btn-pdf">⬇ PDF</button>
+                                    <button id="category-download-png-btn" class="btn btn-png">⬇ PNG</button>
+                                </div>
+                            </div>
+                            <div class="table-responsive" id="category-transactions-wrapper">
+                                <table class="data-table" id="category-tab-recent-table">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th class="sortable" data-sort="date">Date <span class="sort-icon">↓</span>
+                                            </th>
+                                            <th class="sortable wrap-text" data-sort="description">
+                                                <div style="display: flex; flex-direction: column; gap: 0.25rem;">
+                                                    <span>Description <span class="sort-icon">↕</span></span>
+                                                    <input type="text" id="category-desc-filter" class="filter-input"
+                                                        placeholder="Filter text..."
+                                                        style="padding: 0.2rem 0.5rem; font-size: 0.8em; width: 100%; font-weight: normal;"
+                                                        onclick="event.stopPropagation()">
+                                                </div>
+                                            </th>
+                                            <th class="sortable" data-sort="category">Category <span
+                                                    class="sort-icon">↕</span></th>
+                                            <th class="sortable" data-sort="source">Bank <span
+                                                    class="sort-icon">↕</span></th>
+                                            <th class="sortable" data-sort="amount">Amount <span
+                                                    class="sort-icon">↕</span></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <!-- Rows populated by JS -->
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div class="pagination" id="category-pagination">
+                                <button id="category-btn-prev" class="btn">Previous</button>
+                                <span id="category-page-info">Page 1</span>
+                                <button id="category-btn-next" class="btn">Next</button>
+                            </div>
+                        </div>
+                    </section>
+
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+    <!-- html2canvas -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <!-- jsPDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <!-- SheetJS for Excel export -->
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+    <script src="app.js"></script>
+</body>
+
+</html>
