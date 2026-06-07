@@ -331,6 +331,22 @@ body {
     background-color: var(--primary-hover) !important;
 }
 
+.sortable:focus-visible {
+    outline: 3px solid var(--info-color);
+    outline-offset: -3px;
+}
+
+/* Empty-state row shown when no transactions match the active filters */
+.empty-row td {
+    text-align: center;
+    padding: 2.5rem 1rem;
+    color: var(--text-muted);
+    font-style: italic;
+    font-family: 'Inter', sans-serif;
+    font-weight: 600;
+    white-space: normal;
+}
+
 .sortable span {
     font-size: 0.9em;
     margin-left: 4px;

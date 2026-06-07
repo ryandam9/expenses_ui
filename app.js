@@ -1,10 +1,21 @@
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+// Currency / locale used for every formatted amount. Change these two values to
+// localise the dashboard (e.g. 'en-AU' + 'AUD' for Australian data).
+const LOCALE = 'en-US';
+const CURRENCY = 'USD';
+
+// Categories dropped entirely on load (treated as non-expenses / internal moves).
+const EXCLUDED_CATEGORIES = ['TRANSFERS'];
+
+// Sentinel "items per page" value meaning "show everything".
+const ALL_ROWS = Number.MAX_SAFE_INTEGER;
+
+// ---------------------------------------------------------------------------
 // State
+// ---------------------------------------------------------------------------
 let transactions = [];
-let filteredTransactions = [];
-let currentPage = 1;
-let itemsPerPage = 50;
-let sortColumn = 'date';
-let sortDirection = 'desc';
 
 // Overview State
 let overviewSortColumn = 'date';
@@ -21,12 +32,9 @@ let catTabDescFilter = '';
 let catTabCurrentPage = 1;
 let catTabItemsPerPage = 50;
 
-
-// Chart instances - No longer needed for Chart.js, keeping variables to prevent errors if referenced, though unused now.
-let overviewTrendChart = null;
+// Chart instances (destroyed and recreated on each render)
 let overviewCategoryChart = null;
 let monthlyTrendChart = null;
-let categoryPieChart = null;
 
 // Colors for charts (Neo-Brutalist Palette)
 const chartColors = [
@@ -264,17 +272,14 @@ async function parseAndLoadDatabase(arrayBuffer) {
       return obj;
     });
 
-    // Ensure numbers are floats and globally ignore "TRANSFERS" category
+    // Ensure numbers are floats and drop globally excluded categories.
     transactions = rawTransactions
-      .filter(t => (t.category || '').toUpperCase() !== 'TRANSFERS')
+      .filter(t => !EXCLUDED_CATEGORIES.includes((t.category || '').toUpperCase()))
       .map(t => {
         t.debit = parseFloat(t.debit) || 0;
         t.credit = parseFloat(t.credit) || 0;
         return t;
       });
-
-    filteredTransactions = [...transactions];
-    filteredTransactions.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
     // Success! Restore button text, hide upload screen, and render views
     if (browseBtn) browseBtn.textContent = '📂 Browse File';
@@ -284,7 +289,7 @@ async function parseAndLoadDatabase(arrayBuffer) {
     console.error("Database parsing error:", error);
     let errorMsg = "Could not load database. Make sure it contains a valid 'expenses' table.\n\nError: " + error.message;
     if (error.message.includes("no such table") || !arrayBuffer || arrayBuffer.byteLength === 0) {
-      errorMsg += "\n\n💡 HINT: The selected database file might be empty (0 bytes). Please make sure to select the database from '/home/ravi/git-repos/my_finances/data/expenses.db' instead of the empty root-level file!";
+      errorMsg += "\n\n💡 HINT: The selected file may be empty (0 bytes) or not a SQLite database. Pick the actual expenses.db file that contains an 'expenses' table.";
     }
     alert(errorMsg);
     const browseBtn = document.getElementById('browse-db-btn');
@@ -326,14 +331,141 @@ function initApp() {
 
 // Formatters
 const formatCurrency = (amount) => {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
+  return new Intl.NumberFormat(LOCALE, { style: 'currency', currency: CURRENCY }).format(amount);
 };
 
 const formatDate = (dateString) => {
   if (!dateString) return '';
-  const date = new Date(dateString);
-  return date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  // Parse YYYY-MM-DD as a *local* date. `new Date('2018-09-01')` is parsed as
+  // UTC midnight and then rendered in local time, which shifts the displayed
+  // day backwards for users west of UTC. Building the date from parts avoids it.
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(dateString));
+  const date = match
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    : new Date(dateString);
+  if (isNaN(date)) return String(dateString);
+  return date.toLocaleDateString(LOCALE, { year: 'numeric', month: 'short', day: 'numeric' });
 };
+
+// Escape user-controlled DB values before inserting them into innerHTML, to
+// prevent stored XSS from a crafted database file.
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[ch]);
+}
+
+// Signed amount for a transaction: positive for credits, negative for debits.
+function signedAmount(t) {
+  return t.credit > 0 ? t.credit : -t.debit;
+}
+
+// --- Shared transaction helpers (used by both views) ---
+
+function transactionSortValue(t, column) {
+  switch (column) {
+    case 'date': return t.date || '';
+    case 'description': return (t.description || '').toLowerCase();
+    case 'category': return (t.category || '').toLowerCase();
+    case 'source': return (t.source || '').toLowerCase();
+    case 'amount': return signedAmount(t);
+    default: return '';
+  }
+}
+
+// Returns a sorted COPY, never mutating the input array.
+function sortTransactions(list, column, direction) {
+  return [...list].sort((a, b) => {
+    const valA = transactionSortValue(a, column);
+    const valB = transactionSortValue(b, column);
+    if (valA < valB) return direction === 'asc' ? -1 : 1;
+    if (valA > valB) return direction === 'asc' ? 1 : -1;
+    return 0;
+  });
+}
+
+// Base set for the Overview view: month-scoped, minus excluded Bendigo rows.
+function getOverviewBase(monthStr) {
+  let f = transactions;
+  if (monthStr) f = f.filter(t => t.date && t.date.startsWith(monthStr));
+  return f.filter(t => !isExcludedBendigoTransaction(t));
+}
+
+// Applies the Overview table's category + description filters on top of a base.
+function applyOverviewTableFilters(list) {
+  let f = list;
+  if (overviewCategoryFilter !== null && overviewCategoryFilter.size > 0) {
+    f = f.filter(t => overviewCategoryFilter.has(t.category || 'Uncategorized'));
+  }
+  if (overviewDescFilter) {
+    f = f.filter(t => (t.description || '').toLowerCase().includes(overviewDescFilter));
+  }
+  return f;
+}
+
+// Base set for the Category view: category-scoped, minus excluded Bendigo rows
+// (the exclusion is now applied consistently with the Overview view).
+function getCategoryBase(categoryStr) {
+  let f = transactions.filter(t => !isExcludedBendigoTransaction(t));
+  if (categoryStr) f = f.filter(t => (t.category || 'Uncategorized') === categoryStr);
+  return f;
+}
+
+function applyCategoryTableFilters(list) {
+  if (!catTabDescFilter) return list;
+  return list.filter(t => (t.description || '').toLowerCase().includes(catTabDescFilter));
+}
+
+// Temporarily expand a scrollable table wrapper so html2canvas captures all rows.
+function prepareWrapperForCapture(wrapper) {
+  const originalStyles = {
+    backgroundColor: wrapper.style.backgroundColor,
+    maxHeight: wrapper.style.maxHeight,
+    overflow: wrapper.style.overflow
+  };
+  wrapper.style.backgroundColor = '#ffffff';
+  wrapper.style.maxHeight = 'none';
+  wrapper.style.overflow = 'visible';
+  return originalStyles;
+}
+
+function restoreWrapper(wrapper, styles) {
+  wrapper.style.backgroundColor = styles.backgroundColor;
+  wrapper.style.maxHeight = styles.maxHeight;
+  wrapper.style.overflow = styles.overflow;
+}
+
+// Renders a "no results" row spanning the whole table body.
+function renderEmptyRow(tbody, colspan, message) {
+  const tr = document.createElement('tr');
+  tr.className = 'empty-row';
+  const td = document.createElement('td');
+  td.colSpan = colspan;
+  td.textContent = message;
+  tr.appendChild(td);
+  tbody.appendChild(tr);
+}
+
+// Builds a single transaction <tr>. All DB-derived text is escaped; the only
+// raw markup is the category icon, which comes from our trusted icon map.
+// Amounts carry an explicit +/- sign so meaning isn't conveyed by colour alone.
+function buildTransactionRow(t, rowNumber) {
+  const amount = signedAmount(t);
+  const amountClass = amount >= 0 ? 'text-success' : 'text-danger';
+  const sign = amount > 0 ? '+' : (amount < 0 ? '−' : '');
+  const cat = t.category || 'Uncategorized';
+  const cfg = getCategoryConfig(cat);
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+            <td>${rowNumber}</td>
+            <td>${escapeHtml(formatDate(t.date))}</td>
+            <td class="wrap-text">${escapeHtml((t.description || '').toUpperCase())}</td>
+            <td><span class="category-tile" style="background:${cfg.bg};color:${cfg.color}">${cfg.icon}<span>${escapeHtml(cat)}</span></span></td>
+            <td>${escapeHtml(t.source || 'N/A')}</td>
+            <td class="${amountClass}">${sign}${formatCurrency(Math.abs(amount))}</td>
+        `;
+  return tr;
+}
 
 // --- Overview View ---
 
@@ -388,6 +520,14 @@ function populateOverviewMonthFilter() {
 
 function setupOverviewSorting() {
   document.querySelectorAll('#recent-table th.sortable').forEach(th => {
+    th.setAttribute('tabindex', '0');
+    th.setAttribute('aria-sort', 'none');
+    // Keyboard support: sort on Enter/Space, but ignore keys that originate from
+    // the filter input / dropdown nested inside the header.
+    th.addEventListener('keydown', (e) => {
+      if (e.target !== th) return;
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); th.click(); }
+    });
     th.addEventListener('click', () => {
       const column = th.dataset.sort;
       if (overviewSortColumn === column) {
@@ -400,12 +540,16 @@ function setupOverviewSorting() {
       // Reset page to 1 on sorting change
       overviewCurrentPage = 1;
 
-      // Update sort icons safely targeting only the icon spans
-      document.querySelectorAll('#recent-table th.sortable .sort-icon').forEach(span => span.textContent = '↕');
+      // Update sort icons + aria-sort, targeting only the icon spans
+      document.querySelectorAll('#recent-table th.sortable').forEach(h => {
+        h.querySelector('.sort-icon').textContent = '↕';
+        h.setAttribute('aria-sort', 'none');
+      });
       const iconSpan = th.querySelector('.sort-icon');
       if (iconSpan) {
         iconSpan.textContent = overviewSortDirection === 'asc' ? '↑' : '↓';
       }
+      th.setAttribute('aria-sort', overviewSortDirection === 'asc' ? 'ascending' : 'descending');
 
       const currentMonth = document.getElementById('overview-month-filter').value;
       renderRecentTransactions(currentMonth);
@@ -430,7 +574,7 @@ function setupOverviewSorting() {
   // Rows per page
   document.getElementById('overview-rows-per-page').addEventListener('change', (e) => {
     if (e.target.value === 'all') {
-      overviewItemsPerPage = 999999;
+      overviewItemsPerPage = ALL_ROWS;
     } else {
       overviewItemsPerPage = parseInt(e.target.value, 10);
     }
@@ -471,15 +615,36 @@ function setupOverviewSorting() {
     renderRecentTransactions(currentMonth);
   });
 
-  // Toggle multi-select dropdown open/close
-  document.getElementById('overview-table-category-filter-trigger').addEventListener('click', (e) => {
+  // Toggle multi-select dropdown open/close.
+  // The menu lives inside a `.table-responsive` wrapper that has `overflow-x`
+  // set, which clips any absolutely-positioned child. We anchor the menu to the
+  // viewport with `position: fixed` so it can never be clipped by the wrapper.
+  const filterTrigger = document.getElementById('overview-table-category-filter-trigger');
+  const filterMenu = document.getElementById('overview-table-category-filter-menu');
+
+  const closeFilterMenu = () => {
+    filterMenu.classList.remove('open');
+    filterTrigger.setAttribute('aria-expanded', 'false');
+  };
+
+  filterTrigger.addEventListener('click', (e) => {
     e.stopPropagation();
-    document.getElementById('overview-table-category-filter-menu').classList.toggle('open');
+    const willOpen = !filterMenu.classList.contains('open');
+    if (willOpen) {
+      filterMenu.classList.add('open');
+      filterTrigger.setAttribute('aria-expanded', 'true');
+      positionMultiSelectMenu(filterTrigger, filterMenu);
+    } else {
+      closeFilterMenu();
+    }
   });
 
-  // Close dropdown when clicking outside
-  document.addEventListener('click', () => {
-    document.getElementById('overview-table-category-filter-menu').classList.remove('open');
+  // Close when clicking outside, scrolling, resizing, or pressing Escape.
+  document.addEventListener('click', closeFilterMenu);
+  window.addEventListener('scroll', closeFilterMenu, true);
+  window.addEventListener('resize', closeFilterMenu);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeFilterMenu();
   });
 
   // Description Text Filter
@@ -549,7 +714,7 @@ function downloadStyledPDF({ title, subtitle, totalExpenses, totalCredits, netBa
     const bgColor = i % 2 === 0 ? '#ffffff' : '#FAF6EE';
     return `
               <tr style="background:${bgColor};">
-                <td style="padding:10px 12px;border-bottom:2px solid #000000;border-right:2px solid #000000;color:#000000;font-family:monospace;font-weight:bold;">${cat}</td>
+                <td style="padding:10px 12px;border-bottom:2px solid #000000;border-right:2px solid #000000;color:#000000;font-family:monospace;font-weight:bold;">${escapeHtml(cat)}</td>
                 <td style="padding:10px 12px;border-bottom:2px solid #000000;color:#cc0033;text-align:right;font-family:monospace;font-weight:900;">${formatCurrency(data.debit)}</td>
               </tr>`;
   }).join('')}
@@ -585,9 +750,9 @@ function downloadStyledPDF({ title, subtitle, totalExpenses, totalCredits, netBa
             <tr style="background:${bgColor};">
               <td style="padding:8px;border-bottom:2px solid #000000;border-right:2px solid #000000;color:#000000;font-family:monospace;font-weight:bold;">${i + 1}</td>
               <td style="padding:8px;border-bottom:2px solid #000000;border-right:2px solid #000000;color:#000000;font-family:monospace;font-weight:bold;">${formatDate(t.date)}</td>
-              <td style="padding:8px;border-bottom:2px solid #000000;border-right:2px solid #000000;color:#000000;word-break:break-word;font-weight:bold;font-size:12px;">${(t.description || '').toUpperCase()}</td>
-              <td style="padding:8px;border-bottom:2px solid #000000;border-right:2px solid #000000;color:#000000;font-weight:bold;">${t.category || 'Uncategorized'}</td>
-              <td style="padding:8px;border-bottom:2px solid #000000;border-right:2px solid #000000;color:#000000;font-weight:bold;">${t.source || 'N/A'}</td>
+              <td style="padding:8px;border-bottom:2px solid #000000;border-right:2px solid #000000;color:#000000;word-break:break-word;font-weight:bold;font-size:12px;">${escapeHtml((t.description || '').toUpperCase())}</td>
+              <td style="padding:8px;border-bottom:2px solid #000000;border-right:2px solid #000000;color:#000000;font-weight:bold;">${escapeHtml(t.category || 'Uncategorized')}</td>
+              <td style="padding:8px;border-bottom:2px solid #000000;border-right:2px solid #000000;color:#000000;font-weight:bold;">${escapeHtml(t.source || 'N/A')}</td>
               <td style="padding:8px;border-bottom:2px solid #000000;color:${amtColor};text-align:right;font-family:monospace;font-weight:900;font-size:13px;">${formatCurrency(Math.abs(amount))}</td>
             </tr>`;
   }).join('')}
@@ -617,28 +782,10 @@ function setupDownloadButton() {
   const pdfBtn = document.getElementById('download-transactions-pdf-btn');
   const xlsBtn = document.getElementById('download-transactions-xls-btn');
 
-  const prepareWrapper = (wrapper) => {
-    const originalStyles = {
-      backgroundColor: wrapper.style.backgroundColor,
-      maxHeight: wrapper.style.maxHeight,
-      overflow: wrapper.style.overflow
-    };
-    wrapper.style.backgroundColor = '#ffffff';
-    wrapper.style.maxHeight = 'none';
-    wrapper.style.overflow = 'visible';
-    return originalStyles;
-  };
-
-  const restoreWrapper = (wrapper, styles) => {
-    wrapper.style.backgroundColor = styles.backgroundColor;
-    wrapper.style.maxHeight = styles.maxHeight;
-    wrapper.style.overflow = styles.overflow;
-  };
-
   if (pngBtn) {
     pngBtn.addEventListener('click', () => {
       const wrapper = document.getElementById('overview-transactions-wrapper');
-      const originalStyles = prepareWrapper(wrapper);
+      const originalStyles = prepareWrapperForCapture(wrapper);
       const monthStr = document.getElementById('overview-month-filter').value;
       const namePart = monthStr || 'all';
 
@@ -659,17 +806,7 @@ function setupDownloadButton() {
     pdfBtn.addEventListener('click', () => {
       const monthStr = document.getElementById('overview-month-filter').value;
       const namePart = monthStr || 'all';
-      let filtered = transactions;
-      if (monthStr) {
-        filtered = filtered.filter(t => t.date && t.date.startsWith(monthStr));
-      }
-      filtered = filtered.filter(t => !isExcludedBendigoTransaction(t));
-      if (overviewCategoryFilter !== null && overviewCategoryFilter.size > 0) {
-        filtered = filtered.filter(t => overviewCategoryFilter.has(t.category || 'Uncategorized'));
-      }
-      if (overviewDescFilter) {
-        filtered = filtered.filter(t => (t.description || '').toLowerCase().includes(overviewDescFilter));
-      }
+      const filtered = applyOverviewTableFilters(getOverviewBase(monthStr));
 
       const totalDebit = filtered.reduce((sum, t) => sum + t.debit, 0);
       const totalCredit = filtered.reduce((sum, t) => sum + t.credit, 0);
@@ -695,28 +832,14 @@ function setupDownloadButton() {
     xlsBtn.addEventListener('click', () => {
       const monthStr = document.getElementById('overview-month-filter').value;
       const namePart = monthStr || 'all';
-      let filtered = transactions;
-      if (monthStr) {
-        filtered = filtered.filter(t => t.date && t.date.startsWith(monthStr));
-      }
-      filtered = filtered.filter(t => !isExcludedBendigoTransaction(t));
-      if (overviewCategoryFilter !== null && overviewCategoryFilter.size > 0) {
-        filtered = filtered.filter(t => overviewCategoryFilter.has(t.category || 'Uncategorized'));
-      }
-      if (overviewDescFilter) {
-        filtered = filtered.filter(t => (t.description || '').toLowerCase().includes(overviewDescFilter));
-      }
+      const filtered = applyOverviewTableFilters(getOverviewBase(monthStr));
       downloadAsExcel(filtered, `transactions-${namePart}.xlsx`);
     });
   }
 }
 
 function renderOverviewSummary(monthStr) {
-  let filtered = transactions;
-  if (monthStr) {
-    filtered = transactions.filter(t => t.date && t.date.startsWith(monthStr));
-  }
-  filtered = filtered.filter(t => !isExcludedBendigoTransaction(t));
+  const filtered = getOverviewBase(monthStr);
 
   const totalDebit = filtered.reduce((sum, t) => sum + t.debit, 0);
   const totalCredit = filtered.reduce((sum, t) => sum + t.credit, 0);
@@ -734,81 +857,23 @@ function renderRecentTransactions(monthStr) {
   const tbody = document.querySelector('#recent-table tbody');
   tbody.innerHTML = '';
 
-  let filtered = transactions;
-  if (monthStr) {
-    filtered = filtered.filter(t => t.date && t.date.startsWith(monthStr));
-  }
-  filtered = filtered.filter(t => !isExcludedBendigoTransaction(t));
-
-  // Sync category checkbox state without rebuilding
+  // Sync category checkbox state without rebuilding the menu.
   updateOverviewCategoryFilterUI();
 
-  // Apply category filter if active
-  if (overviewCategoryFilter !== null && overviewCategoryFilter.size > 0) {
-    filtered = filtered.filter(t => overviewCategoryFilter.has(t.category || 'Uncategorized'));
-  }
-
-  // Apply description filter if active
-  if (overviewDescFilter) {
-    filtered = filtered.filter(t => (t.description || '').toLowerCase().includes(overviewDescFilter));
-  }
-
-  let itemsToRender = filtered;
-
-  // Sort Overview Transactions
-  itemsToRender.sort((a, b) => {
-    let valA, valB;
-    switch (overviewSortColumn) {
-      case 'date':
-        valA = a.date || '';
-        valB = b.date || '';
-        break;
-      case 'description':
-        valA = (a.description || '').toLowerCase();
-        valB = (b.description || '').toLowerCase();
-        break;
-      case 'category':
-        valA = (a.category || '').toLowerCase();
-        valB = (b.category || '').toLowerCase();
-        break;
-      case 'source':
-        valA = (a.source || '').toLowerCase();
-        valB = (b.source || '').toLowerCase();
-        break;
-      case 'amount':
-        valA = a.credit > 0 ? a.credit : -a.debit;
-        valB = b.credit > 0 ? b.credit : -b.debit;
-        break;
-      default:
-        valA = '';
-        valB = '';
-    }
-    if (valA < valB) return overviewSortDirection === 'asc' ? -1 : 1;
-    if (valA > valB) return overviewSortDirection === 'asc' ? 1 : -1;
-    return 0;
-  });
+  const filtered = applyOverviewTableFilters(getOverviewBase(monthStr));
+  const itemsToRender = sortTransactions(filtered, overviewSortColumn, overviewSortDirection);
 
   // Pagination
   const startIdx = (overviewCurrentPage - 1) * overviewItemsPerPage;
   const endIdx = startIdx + overviewItemsPerPage;
   const paginatedItems = itemsToRender.slice(startIdx, endIdx);
 
-  paginatedItems.forEach((t, index) => {
-    const tr = document.createElement('tr');
-    const amount = t.credit > 0 ? t.credit : -t.debit;
-    const amountClass = t.credit > 0 ? 'text-success' : 'text-danger';
+  if (paginatedItems.length === 0) {
+    renderEmptyRow(tbody, 6, 'No transactions match your filters.');
+  }
 
-    const cat = t.category || 'Uncategorized';
-    const cfg = getCategoryConfig(cat);
-    tr.innerHTML = `
-            <td>${startIdx + index + 1}</td>
-            <td>${formatDate(t.date)}</td>
-            <td class="wrap-text">${(t.description || '').toUpperCase()}</td>
-            <td><span class="category-tile" style="background:${cfg.bg};color:${cfg.color}">${cfg.icon}<span>${cat}</span></span></td>
-            <td>${t.source || 'N/A'}</td>
-            <td class="${amountClass}">${formatCurrency(Math.abs(amount))}</td>
-        `;
-    tbody.appendChild(tr);
+  paginatedItems.forEach((t, index) => {
+    tbody.appendChild(buildTransactionRow(t, startIdx + index + 1));
   });
 
   // Update pagination info
@@ -861,30 +926,52 @@ function updateOverviewCategoryFilterUI() {
   }
 }
 
+// Anchor a multi-select menu to the viewport just below its trigger so it is
+// never clipped by an ancestor with `overflow` set, and keep it on-screen.
+function positionMultiSelectMenu(trigger, menu) {
+  const rect = trigger.getBoundingClientRect();
+  menu.style.position = 'fixed';
+  menu.style.top = `${rect.bottom + 4}px`;
+  menu.style.left = `${rect.left}px`;
+  menu.style.minWidth = `${rect.width}px`;
+  // After it has a width, nudge it back inside the viewport if it overflows.
+  requestAnimationFrame(() => {
+    const menuRect = menu.getBoundingClientRect();
+    if (menuRect.right > window.innerWidth - 8) {
+      menu.style.left = `${Math.max(8, window.innerWidth - menuRect.width - 8)}px`;
+    }
+  });
+}
+
 function populateOverviewCategoryFilterMenu(monthStr) {
-  let available = transactions;
-  if (monthStr) {
-    available = available.filter(t => t.date && t.date.startsWith(monthStr));
-  }
-  available = available.filter(t => !isExcludedBendigoTransaction(t));
+  const available = getOverviewBase(monthStr);
   const categories = [...new Set(available.map(t => t.category || 'Uncategorized'))].sort();
   const menu = document.getElementById('overview-table-category-filter-menu');
-  menu.innerHTML = '<label class="multi-select-option all-option"><input type="checkbox" value="__all__"> All</label>';
+  menu.innerHTML = '';
+
+  // "All" option (static, trusted markup).
+  const allLabel = document.createElement('label');
+  allLabel.className = 'multi-select-option all-option';
+  allLabel.innerHTML = '<input type="checkbox" value="__all__"> All';
+  menu.appendChild(allLabel);
+
+  // Per-category options, built from DOM nodes so category names can never
+  // inject markup.
   categories.forEach(c => {
     const label = document.createElement('label');
     label.className = 'multi-select-option';
-    label.innerHTML = `<input type="checkbox" value="${c.replace(/"/g, '&quot;')}"> ${c}`;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = c;
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(' ' + c));
     menu.appendChild(label);
   });
   updateOverviewCategoryFilterUI();
 }
 
 function renderOverviewCharts(monthStr) {
-  let filteredForCategory = transactions;
-  if (monthStr) {
-    filteredForCategory = transactions.filter(t => t.date && t.date.startsWith(monthStr));
-  }
-  filteredForCategory = filteredForCategory.filter(t => !isExcludedBendigoTransaction(t));
+  const filteredForCategory = getOverviewBase(monthStr);
   const categoryData = aggregateByCategory(filteredForCategory);
 
   const sortedCategories = Object.entries(categoryData)
@@ -1001,7 +1088,7 @@ function renderOverviewCharts(monthStr) {
     const tr = document.createElement('tr');
 
     tr.innerHTML = `
-            <td><span class="category-tile" style="background:${cfg.bg};color:${cfg.color}">${cfg.icon}<span>${categoryName}</span></span></td>
+            <td><span class="category-tile" style="background:${cfg.bg};color:${cfg.color}">${cfg.icon}<span>${escapeHtml(categoryName)}</span></span></td>
             <td style="text-align: right;" class="text-danger">${formatCurrency(c[1].debit)}</td>
         `;
 
@@ -1020,18 +1107,6 @@ function aggregateByMonth(data) {
     acc[month].credit += t.credit;
     acc[month].debit += t.debit;
     acc[month].count += 1;
-  });
-  return acc;
-}
-
-function aggregateByBank(data) {
-  const acc = {};
-  data.forEach(t => {
-    const bank = t.source || 'Unknown';
-    if (!acc[bank]) acc[bank] = { credit: 0, debit: 0, count: 0 };
-    acc[bank].credit += t.credit;
-    acc[bank].debit += t.debit;
-    acc[bank].count += 1;
   });
   return acc;
 }
@@ -1087,6 +1162,12 @@ function populateCategoryTabFilter() {
 
 function setupCategoryTabEvents() {
   document.querySelectorAll('#category-tab-recent-table th.sortable').forEach(th => {
+    th.setAttribute('tabindex', '0');
+    th.setAttribute('aria-sort', 'none');
+    th.addEventListener('keydown', (e) => {
+      if (e.target !== th) return;
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); th.click(); }
+    });
     th.addEventListener('click', () => {
       const column = th.dataset.sort;
       if (catTabSortColumn === column) {
@@ -1099,12 +1180,16 @@ function setupCategoryTabEvents() {
       // Reset page to 1 on sorting change
       catTabCurrentPage = 1;
 
-      // Update sort icons safely targeting only the icon spans
-      document.querySelectorAll('#category-tab-recent-table th.sortable .sort-icon').forEach(span => span.textContent = '↕');
+      // Update sort icons + aria-sort, targeting only the icon spans
+      document.querySelectorAll('#category-tab-recent-table th.sortable').forEach(h => {
+        h.querySelector('.sort-icon').textContent = '↕';
+        h.setAttribute('aria-sort', 'none');
+      });
       const iconSpan = th.querySelector('.sort-icon');
       if (iconSpan) {
         iconSpan.textContent = catTabSortDirection === 'asc' ? '↑' : '↓';
       }
+      th.setAttribute('aria-sort', catTabSortDirection === 'asc' ? 'ascending' : 'descending');
 
       const currentCat = document.getElementById('category-tab-filter').value;
       renderCategoryTabTransactions(currentCat);
@@ -1129,7 +1214,7 @@ function setupCategoryTabEvents() {
   // Rows per page
   document.getElementById('category-tab-rows-per-page').addEventListener('change', (e) => {
     if (e.target.value === 'all') {
-      catTabItemsPerPage = 999999;
+      catTabItemsPerPage = ALL_ROWS;
     } else {
       catTabItemsPerPage = parseInt(e.target.value, 10);
     }
@@ -1151,28 +1236,10 @@ function setupCategoryTabEvents() {
   const pdfBtn = document.getElementById('category-download-pdf-btn');
   const xlsBtn = document.getElementById('category-download-xls-btn');
 
-  const prepareWrapper = (wrapper) => {
-    const originalStyles = {
-      backgroundColor: wrapper.style.backgroundColor,
-      maxHeight: wrapper.style.maxHeight,
-      overflow: wrapper.style.overflow
-    };
-    wrapper.style.backgroundColor = '#ffffff';
-    wrapper.style.maxHeight = 'none';
-    wrapper.style.overflow = 'visible';
-    return originalStyles;
-  };
-
-  const restoreWrapper = (wrapper, styles) => {
-    wrapper.style.backgroundColor = styles.backgroundColor;
-    wrapper.style.maxHeight = styles.maxHeight;
-    wrapper.style.overflow = styles.overflow;
-  };
-
   if (pngBtn) {
     pngBtn.addEventListener('click', () => {
       const wrapper = document.getElementById('category-transactions-wrapper');
-      const originalStyles = prepareWrapper(wrapper);
+      const originalStyles = prepareWrapperForCapture(wrapper);
       const categoryStr = document.getElementById('category-tab-filter').value;
       const namePart = categoryStr ? categoryStr.replace(/[^a-zA-Z0-9]/g, '-') : 'all';
 
@@ -1193,13 +1260,7 @@ function setupCategoryTabEvents() {
     pdfBtn.addEventListener('click', () => {
       const categoryStr = document.getElementById('category-tab-filter').value;
       const namePart = categoryStr ? categoryStr.replace(/[^a-zA-Z0-9]/g, '-') : 'all';
-      let filtered = transactions;
-      if (categoryStr) {
-        filtered = filtered.filter(t => (t.category || 'Uncategorized') === categoryStr);
-      }
-      if (catTabDescFilter) {
-        filtered = filtered.filter(t => (t.description || '').toLowerCase().includes(catTabDescFilter));
-      }
+      const filtered = applyCategoryTableFilters(getCategoryBase(categoryStr));
 
       const totalDebit = filtered.reduce((sum, t) => sum + t.debit, 0);
       const totalCredit = filtered.reduce((sum, t) => sum + t.credit, 0);
@@ -1222,13 +1283,7 @@ function setupCategoryTabEvents() {
     xlsBtn.addEventListener('click', () => {
       const categoryStr = document.getElementById('category-tab-filter').value;
       const namePart = categoryStr ? categoryStr.replace(/[^a-zA-Z0-9]/g, '-') : 'all';
-      let filtered = transactions;
-      if (categoryStr) {
-        filtered = filtered.filter(t => (t.category || 'Uncategorized') === categoryStr);
-      }
-      if (catTabDescFilter) {
-        filtered = filtered.filter(t => (t.description || '').toLowerCase().includes(catTabDescFilter));
-      }
+      const filtered = applyCategoryTableFilters(getCategoryBase(categoryStr));
       downloadAsExcel(filtered, `transactions-${namePart}.xlsx`);
     });
   }
@@ -1238,78 +1293,27 @@ function renderCategoryTabTransactions(categoryStr) {
   const tbody = document.querySelector('#category-tab-recent-table tbody');
   tbody.innerHTML = '';
 
-  let filtered = transactions;
-  if (categoryStr) {
-    filtered = filtered.filter(t => (t.category || 'Uncategorized') === categoryStr);
-  }
+  const filtered = applyCategoryTableFilters(getCategoryBase(categoryStr));
 
-  // Apply description filter if active
-  if (catTabDescFilter) {
-    filtered = filtered.filter(t => (t.description || '').toLowerCase().includes(catTabDescFilter));
-  }
-
-  const totalAmount = filtered.reduce((sum, t) => sum + (t.credit > 0 ? t.credit : -t.debit), 0);
+  const totalAmount = filtered.reduce((sum, t) => sum + signedAmount(t), 0);
 
   const totalEl = document.getElementById('category-total-amount');
   totalEl.textContent = formatCurrency(Math.abs(totalAmount));
   totalEl.style.color = totalAmount >= 0 ? '#10b981' : '#ef4444';
 
-  let itemsToRender = filtered;
-
-  // Sort
-  itemsToRender.sort((a, b) => {
-    let valA, valB;
-    switch (catTabSortColumn) {
-      case 'date':
-        valA = a.date || '';
-        valB = b.date || '';
-        break;
-      case 'description':
-        valA = (a.description || '').toLowerCase();
-        valB = (b.description || '').toLowerCase();
-        break;
-      case 'category':
-        valA = (a.category || '').toLowerCase();
-        valB = (b.category || '').toLowerCase();
-        break;
-      case 'source':
-        valA = (a.source || '').toLowerCase();
-        valB = (b.source || '').toLowerCase();
-        break;
-      case 'amount':
-        valA = a.credit > 0 ? a.credit : -a.debit;
-        valB = b.credit > 0 ? b.credit : -b.debit;
-        break;
-      default:
-        valA = '';
-        valB = '';
-    }
-    if (valA < valB) return catTabSortDirection === 'asc' ? -1 : 1;
-    if (valA > valB) return catTabSortDirection === 'asc' ? 1 : -1;
-    return 0;
-  });
+  const itemsToRender = sortTransactions(filtered, catTabSortColumn, catTabSortDirection);
 
   // Pagination
   const startIdx = (catTabCurrentPage - 1) * catTabItemsPerPage;
   const endIdx = startIdx + catTabItemsPerPage;
   const paginatedItems = itemsToRender.slice(startIdx, endIdx);
 
-  paginatedItems.forEach((t, index) => {
-    const tr = document.createElement('tr');
-    const amount = t.credit > 0 ? t.credit : -t.debit;
-    const amountClass = t.credit > 0 ? 'text-success' : 'text-danger';
+  if (paginatedItems.length === 0) {
+    renderEmptyRow(tbody, 6, 'No transactions match your filters.');
+  }
 
-    const cat = t.category || 'Uncategorized';
-    const cfg = getCategoryConfig(cat);
-    tr.innerHTML = `
-            <td>${startIdx + index + 1}</td>
-            <td>${formatDate(t.date)}</td>
-            <td class="wrap-text">${(t.description || '').toUpperCase()}</td>
-            <td><span class="category-tile" style="background:${cfg.bg};color:${cfg.color}">${cfg.icon}<span>${cat}</span></span></td>
-            <td>${t.source || 'N/A'}</td>
-            <td class="${amountClass}">${formatCurrency(Math.abs(amount))}</td>
-        `;
-    tbody.appendChild(tr);
+  paginatedItems.forEach((t, index) => {
+    tbody.appendChild(buildTransactionRow(t, startIdx + index + 1));
   });
 
   // Update pagination info
@@ -1325,10 +1329,7 @@ function renderCategoryTabTransactions(categoryStr) {
 }
 
 function renderCategoryTabCharts(categoryStr) {
-  let filteredForChart = transactions;
-  if (categoryStr) {
-    filteredForChart = transactions.filter(t => (t.category || 'Uncategorized') === categoryStr);
-  }
+  const filteredForChart = getCategoryBase(categoryStr);
   const monthlyData = aggregateByMonth(filteredForChart);
   const sortedMonths = Object.entries(monthlyData).sort((a, b) => a[0].localeCompare(b[0]));
 

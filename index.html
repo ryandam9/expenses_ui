@@ -44,7 +44,11 @@
                     <p>Drag & drop your <strong>expenses.db</strong> SQLite file here, or click below to select it.</p>
                     <p
                         style="font-size: 0.9rem; margin-top: 1.5rem; color: var(--text-muted); font-family: 'Google Sans Code', Monaco, Consolas, monospace; background-color: #f0f0f0; padding: 0.5rem; border: 2px solid #000; display: inline-block;">
-                        Required: <code>/home/ravi/Desktop/temp/statements/output/expenses.db</code>
+                        Expected: a SQLite file with an <code>expenses</code> table
+                        (columns: date, description, category, source, debit, credit).
+                    </p>
+                    <p style="font-size: 0.8rem; margin-top: 0.75rem; color: var(--text-muted);">
+                        Everything is processed locally in your browser — nothing is uploaded.
                     </p>
                     <input type="file" id="db-file-input" accept=".db,.sqlite,.sqlite3" style="display: none;">
                     <div style="margin-top: 1.5rem;">
@@ -159,6 +163,8 @@
                                                     <div class="multi-select-dropdown"
                                                         onclick="event.stopPropagation()">
                                                         <button id="overview-table-category-filter-trigger"
+                                                            type="button" aria-haspopup="true"
+                                                            aria-expanded="false" aria-label="Filter by category"
                                                             class="multi-select-trigger filter-input"
                                                             style="padding: 0.1rem 0.5rem; font-size: 0.8em; min-width: 120px;">
                                                             <span id="overview-category-filter-label">All
